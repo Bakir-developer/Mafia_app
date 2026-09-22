@@ -193,6 +193,8 @@ class GamePlayer(Base):
         foreign_keys="[NightAction.actor_id]", back_populates="actor", cascade="all, delete-orphan"
     )
 
+    has_sent_last_words: Mapped[bool] = mapped_column(Boolean, default=False)
+
     __table_args__ = (UniqueConstraint('game_id', 'user_id', name='uq_game_player_user'),)
 
 

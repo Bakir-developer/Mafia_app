@@ -33,7 +33,7 @@ game_router = APIRouter(prefix='/game', tags=['Game'])
 game_player_router = APIRouter(prefix='/game-player', tags=['GamePlayer'])
 game_round_router = APIRouter(prefix='/game-round', tags=['GameRound'])
 
-MIN_PLAYERS = 4  # 1 mafia + doctor + commissar + жок дегенде 1 civilian
+MIN_PLAYERS = 4
 
 
 async def get_db():
@@ -77,14 +77,13 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
             detail=f"need at least {MIN_PLAYERS} players to start a game",
         )
 
-    # Ролдорду random бөлүү
     deck = build_role_deck(len(room_players))
     random.shuffle(deck)
     random.shuffle(room_players)
 
     game_db = Game(room_id=game_data.room_id, current_round=1, current_phase=GamePhase.NIGHT)
     db.add(game_db)
-    db.flush()  # game_db.id алуу үчүн, commit'ке чейин
+    db.flush()
 
     for room_player, role in zip(room_players, deck):
         db.add(GamePlayer(
@@ -94,7 +93,6 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
             is_alive=True
         ))
 
-    # Создаём первый раунд
     game_round = GameRound(
         game_id=game_db.id,
         round_number=1
@@ -102,7 +100,6 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
 
     db.add(game_round)
 
-    # Переводим комнату в статус игры
     room_db.status = RoomStatus.IN_PROGRESS
 
     db.commit()
@@ -225,7 +222,6 @@ async def update_game(game_id: int, game_data: GameUpdateSchema, db: Session = D
     for key, value in game_data.dict(exclude_unset=True).items():
         setattr(game_db, key, value)
 
-    # Жеңүүчү аныкталса, комнатаны да FINISHED кылабыз
     if game_data.winner is not None:
         game_db.room.status = RoomStatus.FINISHED
 
@@ -244,12 +240,6 @@ async def delete_game(game_id: int, db: Session = Depends(get_db)):
     return {'status': 'success deleted'}
 
 
-# ============================================================================
-# GAME PLAYER
-# (create/update/delete жок — ролдор create_game учурунда автоматтык бөлүнөт,
-#  is_alive/eliminated_* талааларын night/voting логикасы гана өзгөртөт)
-# ============================================================================
-
 @game_player_router.get('/list', response_model=List[GamePlayerListSchema])
 async def list_game_player(game_id: Optional[int] = None, db: Session = Depends(get_db)):
     query = db.query(GamePlayer)
@@ -264,7 +254,6 @@ async def detail_game_player(game_player_id: int, db: Session = Depends(get_db))
     if not game_player_db:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game player not found")
     return game_player_db
-
 
 
 @game_round_router.get('/list', response_model=List[GameRoundListSchema])
@@ -310,7 +299,6 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
             detail="game round not found"
         )
 
-    # Получаем все голоса этого раунда
     votes = db.query(Vote).filter(
         Vote.round_id == round_db.id
     ).all()
@@ -321,13 +309,11 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
             detail="no votes"
         )
 
-    # Считаем голоса
     vote_count = {}
 
     for vote in votes:
         vote_count[vote.target_id] = vote_count.get(vote.target_id, 0) + 1
 
-    # Игрок с максимальным количеством голосов
     eliminated_player_id = max(
         vote_count,
         key=vote_count.get
@@ -348,14 +334,12 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
             detail="target player not found"
         )
 
-    # Исключаем игрока
     eliminated_player.is_alive = False
     eliminated_player.eliminated_round = round_db.id
     eliminated_player.eliminated_reason = EliminationReason.VOTE
 
     round_db.eliminated_player_id = eliminated_player.id
 
-    # Проверяем победителя
     alive_players = db.query(GamePlayer).filter(
         GamePlayer.game_id == game_id,
         GamePlayer.is_alive == True
@@ -371,7 +355,6 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
         if player.role != GameRole.mafia
     )
 
-    # Победа мафии
     if mafia_count >= civilian_count:
         game.winner = GameWinner.MAFIA
         game.current_phase = GamePhase.DAY
@@ -387,7 +370,6 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
             "phase": game.current_phase
         }
 
-    # Победа мирных
     if mafia_count == 0:
         game.winner = GameWinner.CITIZENS
         game.current_phase = GamePhase.DAY
@@ -403,7 +385,6 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
             "phase": game.current_phase
         }
 
-    # Игра продолжается → новый раунд
     game.current_round += 1
     game.current_phase = GamePhase.NIGHT
 
