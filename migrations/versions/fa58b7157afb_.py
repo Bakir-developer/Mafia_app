@@ -1,14 +1,8 @@
 """empty message
 
-<<<<<<<< HEAD:migrations/versions/dbebdd6cff62_.py
-Revision ID: dbebdd6cff62
+Revision ID: fa58b7157afb
 Revises: 
-Create Date: 2026-09-17 15:54:09.250728
-========
-Revision ID: d6970c13df62
-Revises: 
-Create Date: 2026-09-17 15:49:06.846255
->>>>>>>> origin/bakir:migrations/versions/d6970c13df62_.py
+Create Date: 2026-09-24 16:48:30.378415
 
 """
 from typing import Sequence, Union
@@ -18,11 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-<<<<<<<< HEAD:migrations/versions/dbebdd6cff62_.py
-revision: str = 'dbebdd6cff62'
-========
-revision: str = 'd6970c13df62'
->>>>>>>> origin/bakir:migrations/versions/d6970c13df62_.py
+revision: str = 'fa58b7157afb'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -51,6 +41,14 @@ def upgrade() -> None:
     sa.UniqueConstraint('email'),
     sa.UniqueConstraint('username')
     )
+    op.create_table('group',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('member_id', sa.Integer(), nullable=False),
+    sa.Column('group_name', sa.String(length=30), nullable=False),
+    sa.Column('group_image', sa.String(), nullable=True),
+    sa.ForeignKeyConstraint(['member_id'], ['user_profile.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('refresh_token',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('token', sa.String(), nullable=False),
@@ -62,7 +60,13 @@ def upgrade() -> None:
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('room_name', sa.String(length=100), nullable=False),
     sa.Column('max_players', sa.SmallInteger(), nullable=False),
+    sa.Column('age', sa.SmallInteger(), nullable=False),
     sa.Column('status', sa.Enum('WAITING', 'STARTING', 'IN_PROGRESS', 'FINISHED', name='roomstatus'), nullable=False),
+    sa.Column('mafia_count', sa.SmallInteger(), nullable=False),
+    sa.Column('doctor_count', sa.SmallInteger(), nullable=False),
+    sa.Column('commissar_count', sa.SmallInteger(), nullable=False),
+    sa.Column('day_time', sa.Integer(), nullable=False),
+    sa.Column('night_time', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('started_at', sa.DateTime(), nullable=True),
     sa.Column('finished_at', sa.DateTime(), nullable=True),
@@ -95,12 +99,25 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('user_id')
     )
+    op.create_table('chat_group',
+    sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('group_id', sa.Integer(), nullable=False),
+    sa.Column('text', sa.String(), nullable=True),
+    sa.Column('image', sa.String(), nullable=True),
+    sa.Column('video', sa.String(), nullable=True),
+    sa.Column('voice', sa.String(), nullable=True),
+    sa.ForeignKeyConstraint(['group_id'], ['group.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['user_profile.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('game',
     sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
     sa.Column('room_id', sa.Integer(), nullable=False),
     sa.Column('current_round', sa.Integer(), nullable=False),
     sa.Column('current_phase', sa.Enum('NIGHT', 'DAY', 'VOTING', name='gamephase'), nullable=True),
     sa.Column('winner', sa.Enum('MAFIA', 'CITIZENS', name='gamewinner'), nullable=True),
+    sa.Column('phase_ends_at', sa.DateTime(), nullable=True),
     sa.Column('started_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
     sa.Column('finished_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['room_id'], ['room.id'], ),
@@ -134,6 +151,7 @@ def upgrade() -> None:
     sa.Column('is_alive', sa.Boolean(), nullable=False),
     sa.Column('eliminated_round', sa.Integer(), nullable=True),
     sa.Column('eliminated_reason', sa.Enum('NIGHT_KILL', 'VOTE', name='eliminationreason'), nullable=True),
+    sa.Column('has_sent_last_words', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['game_id'], ['game.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user_profile.id'], ),
     sa.PrimaryKeyConstraint('id'),
@@ -190,10 +208,12 @@ def downgrade() -> None:
     op.drop_table('room_player')
     op.drop_table('review')
     op.drop_table('game')
+    op.drop_table('chat_group')
     op.drop_table('user_statistics')
     op.drop_table('user_achievement')
     op.drop_table('room')
     op.drop_table('refresh_token')
+    op.drop_table('group')
     op.drop_table('user_profile')
     op.drop_table('achievement')
     # ### end Alembic commands ###

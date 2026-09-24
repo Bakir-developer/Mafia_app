@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from mysite.db.database import SessionLocal
 from mysite.db.models import UserProfile, UserStatistic
-from mysite.db.schema import UserProfileSchema
+from mysite.db.schema import (UserProfileSchema, UserProfileListSchema, UserProfileDetailSchema)
 from typing import List
 
 user_router = APIRouter(prefix='/user', tags=['User'])
@@ -14,25 +14,31 @@ async def get_db():
     finally:
         db.close()
 
-@user_router.get('/list', response_model=List[UserProfileSchema])
-async def list_user(db: Session= Depends(get_db)):
+@user_router.get('/list', response_model=List[UserProfileListSchema])
+async def list_user(db: Session = Depends(get_db)):
     user_db = db.query(UserProfile).all()
     return user_db
 
-@user_router.get('/detail', response_model=UserProfileSchema)
+
+@user_router.get('/detail', response_model=UserProfileDetailSchema)
 async def detail_user(user_id: int, db: Session = Depends(get_db)):
     user_db = db.query(UserProfile).filter(UserProfile.id == user_id).first()
+
     if not user_db:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Munday adam jok')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
     return user_db
 
 @user_router.put('/update')
 async def update_user(user_id: int, user_data: UserProfileSchema, db: Session = Depends(get_db)):
     user_db = db.query(UserProfile).filter(UserProfile.id == user_id).first()
+
     if not user_db:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Mynday adam jok')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
     for user_key, user_value in user_data.dict().items():
         setattr(user_db, user_key, user_value)
+
     db.commit()
     db.refresh(user_db)
     return user_db
@@ -40,10 +46,13 @@ async def update_user(user_id: int, user_data: UserProfileSchema, db: Session = 
 @user_router.delete('/delete')
 async def delete_user(user_id: int, db: Session = Depends(get_db)):
     user_db = db.query(UserProfile).filter(UserProfile.id == user_id).first()
+
     if not user_db:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Munday adam jok')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
     db.delete(user_db)
     db.commit()
+
     return {'message': 'success deleted'}
 
 
@@ -52,8 +61,7 @@ async def user_profile(user_id: int, db: Session = Depends(get_db)):
     user = db.query(UserProfile).filter(UserProfile.id == user_id).first()
 
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
 
     statistic = db.query(UserStatistic).filter(UserStatistic.user_id == user_id).first()
 
@@ -68,7 +76,6 @@ async def user_profile(user_id: int, db: Session = Depends(get_db)):
 
     if statistic.games_played > 0:
         winrate = (statistic.wins / statistic.games_played) * 100
-
         average_game_time = (statistic.total_game_time / statistic.games_played)
 
     roles = {

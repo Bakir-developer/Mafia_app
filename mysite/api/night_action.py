@@ -4,19 +4,11 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy.orm import Session
 
 from mysite.db.database import SessionLocal
-from mysite.db.models import NightAction, Vote, Achievement, UserAchievement, GameRound, GamePlayer
-from mysite.db.schema import (
-    NightActionCreateSchema,
-    NightActionDetailSchema,
-    VoteCreateSchema,
-    VoteDetailSchema,
-    AchievementCreateSchema,
-    AchievementUpdateSchema,
-    AchievementListSchema,
-    AchievementDetailSchema,
-    UserAchievementListSchema,
-    UserAchievementDetailSchema,
-)
+from mysite.db.models import (NightAction, Vote, Achievement, UserAchievement, GameRound, GamePlayer,
+                              UserProfile, UserStatistic, AchievementCode, Game, GameWinner, GameRole, NightActionType)
+from mysite.db.schema import (NightActionCreateSchema, NightActionDetailSchema, VoteCreateSchema,
+                              VoteDetailSchema, AchievementCreateSchema, AchievementUpdateSchema,
+                              AchievementListSchema, AchievementDetailSchema, UserAchievementListSchema, UserAchievementDetailSchema)
 
 night_action_router = APIRouter(prefix='/night-action', tags=['NightAction'])
 vote_router = APIRouter(prefix='/vote', tags=['Vote'])
@@ -164,6 +156,121 @@ async def delete_achievement(achievement_id: int, db: Session = Depends(get_db))
     db.delete(achievement_db)
     db.commit()
     return {'status': 'success deleted'}
+
+def unlock_achievement(db: Session, user_id: int, achievement_code: AchievementCode):
+    achievement = (db.query(Achievement).filter(Achievement.code == achievement_code).first())
+
+    if not achievement:
+        return None
+
+    existing = (db.query(UserAchievement).filter(UserAchievement.user_id == user_id,
+                                                 UserAchievement.achievement_id == achievement.id).first())
+
+    if existing:
+        return existing
+
+    user_achievement = UserAchievement(user_id=user_id,achievement_id=achievement.id)
+
+    db.add(user_achievement)
+    db.flush()
+
+    return user_achievement
+
+def check_game_achievements(db: Session, game_id: int):
+
+    game = (db.query(Game).filter(Game.id == game_id).first())
+
+    if not game:
+        return []
+
+    if not game.winner:
+        return []
+
+    players = (db.query(GamePlayer).filter(GamePlayer.game_id == game_id).all())
+    rounds = (db.query(GameRound).filter(GameRound.game_id == game_id).all())
+
+    unlocked = []
+
+    for player in players:
+
+        user_id = player.user_id
+        statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == user_id).first())
+
+        if statistic and statistic.wins >= 1:
+
+            result = unlock_achievement(db, user_id, AchievementCode.FIRST_WIN)
+
+            if result:
+                unlocked.append(result)
+
+        if (player.role == GameRole.mafia
+                and game.winner == GameWinner.MAFIA):
+
+            result = unlock_achievement(db, user_id, AchievementCode.MAFIA_MASTERMIND)
+
+            if result:
+                unlocked.append(result)
+
+        if player.is_alive:
+
+            result = unlock_achievement(db, user_id, AchievementCode.SURVIVOR)
+
+            if result:
+                unlocked.append(result)
+
+        if (player.role != GameRole.mafia and player.is_alive
+                and game.winner == GameWinner.CITIZENS):
+
+            result = unlock_achievement(db, user_id, AchievementCode.PERFECT_TOWN)
+
+            if result:
+                unlocked.append(result)
+
+        for round_db in rounds:
+
+            if not round_db.saved_by_doctor:
+                continue
+
+            heal_action = (db.query(NightAction).filter(NightAction.round_id == round_db.id,
+                    NightAction.action_type == NightActionType.HEAL).first())
+
+            if not heal_action:
+                continue
+
+            doctor = (db.query(GamePlayer).filter(GamePlayer.id == heal_action.actor_id,
+                    GamePlayer.game_id == game_id, GamePlayer.role == GameRole.doctor).first())
+
+            if not doctor:
+                continue
+
+            result = unlock_achievement(db, doctor.user_id, AchievementCode.GUARDIAN_ANGEL)
+
+            if result:
+                unlocked.append(result)
+
+        for round_db in rounds:
+
+            check_actions = (db.query(NightAction).filter(NightAction.round_id == round_db.id,
+                    NightAction.action_type == NightActionType.CHECK).all())
+
+            for action in check_actions:
+
+                commissar = (db.query(GamePlayer).filter(GamePlayer.id == action.actor_id,
+                        GamePlayer.game_id == game_id, GamePlayer.role == GameRole.commissar).first())
+
+                target = (db.query(GamePlayer).filter(GamePlayer.id == action.target_id,
+                        GamePlayer.game_id == game_id).first())
+
+                if not commissar or not target:
+                    continue
+
+                if target.role == GameRole.mafia:
+                    result = unlock_achievement(db, commissar.user_id, AchievementCode.SHERLOCK)
+
+                    if result:
+                        unlocked.append(result)
+
+    return unlocked
 
 
 @user_achievement_router.get('/list', response_model=List[UserAchievementListSchema])

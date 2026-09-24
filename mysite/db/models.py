@@ -74,6 +74,14 @@ class Room(Base):
     max_players: Mapped[int] = mapped_column(SmallInteger)
     age: Mapped[int] = mapped_column(SmallInteger)
     status: Mapped[RoomStatus] = mapped_column(Enum(RoomStatus), default=RoomStatus.WAITING)
+
+    mafia_count: Mapped[int] = mapped_column(SmallInteger, default=1)
+    doctor_count: Mapped[int] = mapped_column(SmallInteger, default=1)
+    commissar_count: Mapped[int] = mapped_column(SmallInteger, default=1)
+
+    day_time: Mapped[int] = mapped_column(Integer, default=60)
+    night_time: Mapped[int] = mapped_column(Integer, default=60)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -159,6 +167,9 @@ class Game(Base):
     current_round: Mapped[int] = mapped_column(Integer, default=0)
     current_phase: Mapped[Optional[GamePhase]] = mapped_column(Enum(GamePhase), nullable=True)
     winner: Mapped[Optional[GameWinner]] = mapped_column(Enum(GameWinner), nullable=True)
+
+    phase_ends_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True)
 
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

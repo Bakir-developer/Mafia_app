@@ -4,11 +4,7 @@ from typing import List, Optional
 
 from mysite.db.database import SessionLocal
 from mysite.db.models import RoomPlayer, Room, UserProfile
-from mysite.db.schema import (
-    RoomPlayerCreateSchema,
-    RoomPlayerListSchema,
-    RoomPlayerDetailSchema,
-)
+from mysite.db.schema import (RoomPlayerCreateSchema, RoomPlayerListSchema, RoomPlayerDetailSchema,)
 
 room_player_router = APIRouter(prefix='/room-player', tags=['RoomPlayer'])
 
@@ -25,10 +21,8 @@ async def create_room_player(
     room_player_data: RoomPlayerCreateSchema,
     db: Session = Depends(get_db)
 ):
-    # 1. Проверяем Room ID
-    room = db.query(Room).filter(
-        Room.id == room_player_data.room_id
-    ).first()
+
+    room = db.query(Room).filter(Room.id == room_player_data.room_id).first()
 
     if not room:
         raise HTTPException(
@@ -36,10 +30,7 @@ async def create_room_player(
             detail="Room not found"
         )
 
-    # 2. Проверяем User ID
-    user = db.query(UserProfile).filter(
-        UserProfile.id == room_player_data.user_id
-    ).first()
+    user = db.query(UserProfile).filter(UserProfile.id == room_player_data.user_id).first()
 
     if not user:
         raise HTTPException(
@@ -47,7 +38,6 @@ async def create_room_player(
             detail="User not found"
         )
 
-    # 3. Проверяем, не добавлен ли уже
     existing = (
         db.query(RoomPlayer)
         .filter(
@@ -63,7 +53,6 @@ async def create_room_player(
             detail="user already joined this room"
         )
 
-    # 4. Создаём
     room_player_db = RoomPlayer(**room_player_data.dict())
 
     db.add(room_player_db)

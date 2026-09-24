@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from mysite.api import (user_profile, auth, statistic, room, room_player, reviews,
-                        game, night_action, timing, websocket)
+                        game, night_action, websocket)
 from mysite.admin.setup import setup_admin
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,6 +28,5 @@ Mafia_app.include_router(night_action.vote_router)
 Mafia_app.include_router(night_action.achievement_router)
 Mafia_app.include_router(night_action.user_achievement_router)
 Mafia_app.include_router(websocket.chat_router)
-Mafia_app.include_router(timing.chat_router)
 
 setup_admin(Mafia_app)

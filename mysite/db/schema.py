@@ -68,11 +68,25 @@ class RoomCreateSchema(BaseModel):
     age: int
     owner_id: int
 
+    mafia_count: int = 1
+    doctor_count: int = 1
+    commissar_count: int = 1
+
+    day_time: int = 60
+    night_time: int = 60
+
 class RoomUpdateSchema(BaseModel):
     room_name: Optional[str] = None
     age: int
     max_players: Optional[int] = None
     status: Optional[RoomStatus] = None
+
+    mafia_count: Optional[int] = None
+    doctor_count: Optional[int] = None
+    commissar_count: Optional[int] = None
+
+    day_time: Optional[int] = None
+    night_time: Optional[int] = None
 
 class RoomListSchema(BaseModel):
     id: int
@@ -81,6 +95,13 @@ class RoomListSchema(BaseModel):
     age: int
     status: RoomStatus
     owner_id: int
+
+    mafia_count: int
+    doctor_count: int
+    commissar_count: int
+
+    day_time: int
+    night_time: int
 
 class RoomDetailSchema(BaseModel):
     id: int
@@ -92,6 +113,13 @@ class RoomDetailSchema(BaseModel):
     started_at: Optional[datetime]
     finished_at: Optional[datetime]
     owner_id: int
+
+    mafia_count: int
+    doctor_count: int
+    commissar_count: int
+
+    day_time: int
+    night_time: int
 
 class RoomPlayerCreateSchema(BaseModel):
     room_id: int
@@ -152,6 +180,8 @@ class GameDetailSchema(BaseModel):
     winner: Optional[GameWinner]
     started_at: datetime
     finished_at: Optional[datetime]
+
+    phase_ends_at: Optional[datetime]
 
 
 class GamePlayerListSchema(BaseModel):
@@ -235,6 +265,10 @@ class AchievementDetailSchema(BaseModel):
     title: str
     description: str
 
+
+class UserAchievementCreateSchema(BaseModel):
+    user_id: int
+    achievement_id: int
 
 class UserAchievementListSchema(BaseModel):
     id: int
