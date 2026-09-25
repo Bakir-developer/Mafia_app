@@ -77,7 +77,7 @@ class RoomCreateSchema(BaseModel):
 
 class RoomUpdateSchema(BaseModel):
     room_name: Optional[str] = None
-    age: int
+    age: Optional[int] = None
     max_players: Optional[int] = None
     status: Optional[RoomStatus] = None
 
@@ -187,14 +187,14 @@ class GameDetailSchema(BaseModel):
 class GamePlayerListSchema(BaseModel):
     id: int
     user_id: int
-    role: GameRole
+    role: Optional[GameRole]
     is_alive: bool
 
 class GamePlayerDetailSchema(BaseModel):
     id: int
     game_id: int
     user_id: int
-    role: GameRole
+    role: Optional[GameRole]
     is_alive: bool
     eliminated_round: Optional[int]
     eliminated_reason: Optional[EliminationReason]
@@ -227,6 +227,7 @@ class NightActionDetailSchema(BaseModel):
     target_id: int
     action_type: NightActionType
     created_at: datetime
+    is_mafia: Optional[bool] = None
 
 class VoteCreateSchema(BaseModel):
     round_id: int

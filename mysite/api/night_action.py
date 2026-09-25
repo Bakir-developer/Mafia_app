@@ -4,11 +4,12 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from sqlalchemy.orm import Session
 
 from mysite.db.database import SessionLocal
-from mysite.db.models import (NightAction, Vote, Achievement, UserAchievement, GameRound, GamePlayer,
+from mysite.db.models import (NightAction, Vote, Achievement, UserAchievement, GameRound, GamePlayer, GamePhase,
                               UserProfile, UserStatistic, AchievementCode, Game, GameWinner, GameRole, NightActionType)
 from mysite.db.schema import (NightActionCreateSchema, NightActionDetailSchema, VoteCreateSchema,
                               VoteDetailSchema, AchievementCreateSchema, AchievementUpdateSchema,
                               AchievementListSchema, AchievementDetailSchema, UserAchievementListSchema, UserAchievementDetailSchema)
+from mysite.api.dependencies import get_current_user
 
 night_action_router = APIRouter(prefix='/night-action', tags=['NightAction'])
 vote_router = APIRouter(prefix='/vote', tags=['Vote'])
@@ -42,14 +43,57 @@ def _check_round_and_players(db: Session, round_id: int, *player_ids: int):
 
 
 @night_action_router.post('/create', response_model=NightActionDetailSchema)
-async def create_night_action(action_data: NightActionCreateSchema, db: Session = Depends(get_db)):
-    _check_round_and_players(db, action_data.round_id, action_data.actor_id, action_data.target_id)
+async def create_night_action(
+    action_data: NightActionCreateSchema,
+    db: Session = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user),
+):
+    round_db = _check_round_and_players(db, action_data.round_id, action_data.actor_id, action_data.target_id)
 
-    action_db = NightAction(**action_data.dict())
-    db.add(action_db)
-    db.commit()
-    db.refresh(action_db)
-    return action_db
+    actor = db.query(GamePlayer).filter(GamePlayer.id == action_data.actor_id).first()
+    game = db.query(Game).filter(Game.id == round_db.game_id).first()
+
+    if actor.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not your player")
+
+    if not actor.is_alive:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dead players cannot act")
+
+    if game.current_phase != GamePhase.NIGHT:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not night phase")
+
+    expected_role = {
+        NightActionType.KILL: GameRole.mafia,
+        NightActionType.HEAL: GameRole.doctor,
+        NightActionType.CHECK: GameRole.commissar,
+    }[action_data.action_type]
+
+    if actor.role != expected_role:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="wrong role for this action")
+
+    existing = (
+        db.query(NightAction)
+        .filter(NightAction.round_id == action_data.round_id, NightAction.actor_id == action_data.actor_id)
+        .first()
+    )
+    if existing:
+        existing.target_id = action_data.target_id
+        existing.action_type = action_data.action_type
+        db.commit()
+        db.refresh(existing)
+        action_db = existing
+    else:
+        action_db = NightAction(**action_data.dict())
+        db.add(action_db)
+        db.commit()
+        db.refresh(action_db)
+
+    response = NightActionDetailSchema.from_orm(action_db).dict()
+    if action_data.action_type == NightActionType.CHECK:
+        target = db.query(GamePlayer).filter(GamePlayer.id == action_data.target_id).first()
+        response["is_mafia"] = target.role == GameRole.mafia
+
+    return response
 
 
 @night_action_router.get('/list', response_model=List[NightActionDetailSchema])

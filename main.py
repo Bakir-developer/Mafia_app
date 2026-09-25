@@ -3,6 +3,8 @@ from mysite.api import (user_profile, auth, statistic, room, room_player, review
                         game, night_action, websocket)
 from mysite.admin.setup import setup_admin
 from fastapi.middleware.cors import CORSMiddleware
+from mysite.api.game import game_scheduler
+import asyncio
 
 Mafia_app = FastAPI(title='FastAPI Mafia_app')
 Mafia_app.add_middleware(
@@ -13,6 +15,9 @@ Mafia_app.add_middleware(
     allow_headers=["*"],
 )
 
+@Mafia_app.on_event("startup")
+async def start_scheduler():
+    asyncio.create_task(game_scheduler())
 
 Mafia_app.include_router(room.room_router)
 Mafia_app.include_router(room_player.room_player_router)
