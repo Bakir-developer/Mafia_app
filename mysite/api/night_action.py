@@ -51,6 +51,7 @@ async def create_night_action(
     round_db = _check_round_and_players(db, action_data.round_id, action_data.actor_id, action_data.target_id)
 
     actor = db.query(GamePlayer).filter(GamePlayer.id == action_data.actor_id).first()
+    target = db.query(GamePlayer).filter(GamePlayer.id == action_data.target_id).first()
     game = db.query(Game).filter(Game.id == round_db.game_id).first()
 
     if actor.user_id != current_user.id:
@@ -58,6 +59,9 @@ async def create_night_action(
 
     if not actor.is_alive:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="dead players cannot act")
+
+    if not target.is_alive:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target is already dead")
 
     if game.current_phase != GamePhase.NIGHT:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not night phase")
@@ -70,6 +74,9 @@ async def create_night_action(
 
     if actor.role != expected_role:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="wrong role for this action")
+
+    if action_data.action_type == NightActionType.KILL and target.role == GameRole.mafia:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="mafia cannot kill another mafia")
 
     existing = (
         db.query(NightAction)
@@ -90,7 +97,6 @@ async def create_night_action(
 
     response = NightActionDetailSchema.from_orm(action_db).dict()
     if action_data.action_type == NightActionType.CHECK:
-        target = db.query(GamePlayer).filter(GamePlayer.id == action_data.target_id).first()
         response["is_mafia"] = target.role == GameRole.mafia
 
     return response
