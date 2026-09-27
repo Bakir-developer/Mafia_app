@@ -9,7 +9,7 @@ from mysite.api.websocket import manager
 from mysite.api.night_action import check_game_achievements
 from mysite.db.database import SessionLocal
 from mysite.api.dependencies import get_current_user
-from mysite.db.models import UserProfile, GameRole
+from mysite.db.models import UserProfile
 from mysite.db.models import (Game, GamePlayer, GameRound, NightAction, Room, Vote, RoomPlayer,
                               RoomStatus, GameRole, NightActionType, EliminationReason,)
 from mysite.db.schema import (GameCreateSchema, GameListSchema, GameDetailSchema, GamePlayerListSchema,
@@ -20,7 +20,7 @@ game_player_router = APIRouter(prefix="/game-player", tags=["GamePlayer"],)
 game_round_router = APIRouter(prefix="/game-round", tags=["GameRound"],)
 
 MIN_PLAYERS = 4
-VOTING_TIME = 30
+VOTING_TIME = 60
 
 async def get_db():
     db = SessionLocal()
