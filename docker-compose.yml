@@ -1,10 +1,10 @@
-version: '3'
-
 services:
 
   fast_web:
     build: .
-    command: uvicorn main:Mafia_app --reload 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    command: uvicorn main:Mafia_app --reload --host 0.0.0.0 --port 8000
     volumes:
       - .:/app
       - static_volume:/app/static
@@ -12,7 +12,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - fast_db
+      fast_db:
+        condition: service_healthy
 
   fast_db:
     image: postgres:17
@@ -23,6 +24,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   nginx:
     build: ./nginx

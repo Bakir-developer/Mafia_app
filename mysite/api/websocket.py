@@ -19,10 +19,10 @@ class ConnectionManager:
         self.connection_games: Dict[WebSocket, int] = {}
 
     async def connect(
-        self,
-        websocket: WebSocket,
-        game_id: int,
-        user_id: int
+            self,
+            websocket: WebSocket,
+            game_id: int,
+            user_id: int
     ):
         if game_id not in self.active_connections:
             self.active_connections[game_id] = []
@@ -31,6 +31,19 @@ class ConnectionManager:
 
         self.connection_users[websocket] = user_id
         self.connection_games[websocket] = game_id
+
+        print("\n========== WS CONNECT ==========")
+        print("GAME ID:", game_id)
+        print("CONNECTED USER ID:", user_id)
+        print("TOTAL CONNECTIONS:", len(self.active_connections[game_id]))
+
+        for ws in self.active_connections[game_id]:
+            print(
+                "CONNECTED USER:",
+                self.connection_users.get(ws)
+            )
+
+        print("================================\n")
 
     def disconnect(
         self,
@@ -91,6 +104,19 @@ class ConnectionManager:
 
         disconnected = []
 
+        print("\n========== BROADCAST CHAT ==========")
+        print("GAME ID:", game_id)
+        print("CHANNEL:", channel)
+        print("CONNECTIONS:", len(connections))
+
+        for ws in connections:
+            print(
+                "TARGET USER:",
+                self.connection_users.get(ws)
+            )
+
+        print("====================================\n")
+
         for websocket in connections:
 
             user_id = self.connection_users.get(websocket)
@@ -111,12 +137,10 @@ class ConnectionManager:
                 continue
 
             if channel == "dead":
-
                 if game_player.is_alive:
                     continue
 
             elif channel == "mafia":
-
                 if not game_player.is_alive:
                     continue
 
@@ -124,11 +148,11 @@ class ConnectionManager:
                     continue
 
             elif channel == "all":
-
                 if not game_player.is_alive:
                     continue
 
             try:
+                print("📤 SEND MESSAGE TO USER:", user_id)
                 await websocket.send_json(data)
 
             except Exception:
