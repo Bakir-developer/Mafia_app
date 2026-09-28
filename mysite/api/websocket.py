@@ -1,61 +1,74 @@
 import json
+import logging
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
 from jose import jwt, JWTError
 from sqlalchemy.orm import Session
+
 from mysite.db.database import SessionLocal
-from mysite.db.models import (UserProfile, Game, GamePlayer, GamePhase, GameRole,)
+from mysite.db.models import UserProfile, Game, GamePlayer, GamePhase, GameRole
 from mysite.config import SECRET_KEY, ALGORITHM
 
+logger = logging.getLogger(__name__)
+
 chat_router = APIRouter(prefix="/ws", tags=["Chat"])
+
+MAX_MESSAGE_LENGTH = 500
+
+ALLOWED_CHANNELS = {"all", "mafia", "dead"}
+
+CHANNEL_ERRORS = {
+    "all": "Общий чат доступен только живым игрокам днём",
+    "mafia": "Чат мафии доступен только живым мафиози ночью",
+    "dead": "Чат мёртвых доступен только мёртвым игрокам",
+}
+
+# user_id -> (жив ли игрок, его роль). Собирается один раз на сообщение,
+# чтобы не держать соединение с БД открытым во время отправки по сокетам.
+PlayersState = Dict[int, Tuple[bool, GameRole]]
+
 
 class ConnectionManager:
 
     def __init__(self):
         self.active_connections: Dict[int, List[WebSocket]] = {}
         self.connection_users: Dict[WebSocket, int] = {}
-
         self.connection_games: Dict[WebSocket, int] = {}
 
     async def connect(
-            self,
-            websocket: WebSocket,
-            game_id: int,
-            user_id: int
+        self,
+        websocket: WebSocket,
+        game_id: int,
+        user_id: int,
     ):
-        if game_id not in self.active_connections:
-            self.active_connections[game_id] = []
-
-        self.active_connections[game_id].append(websocket)
+        self.active_connections.setdefault(game_id, []).append(websocket)
 
         self.connection_users[websocket] = user_id
         self.connection_games[websocket] = game_id
 
-        print("\n========== WS CONNECT ==========")
-        print("GAME ID:", game_id)
-        print("CONNECTED USER ID:", user_id)
-        print("TOTAL CONNECTIONS:", len(self.active_connections[game_id]))
-
-        for ws in self.active_connections[game_id]:
-            print(
-                "CONNECTED USER:",
-                self.connection_users.get(ws)
-            )
-
-        print("================================\n")
+        logger.debug(
+            "ws connect: game=%s user=%s total=%s",
+            game_id,
+            user_id,
+            len(self.active_connections[game_id]),
+        )
 
     def disconnect(
         self,
         websocket: WebSocket,
-        game_id: int
+        game_id: int,
     ):
-        if game_id in self.active_connections:
+        connections = self.active_connections.get(game_id)
 
-            if websocket in self.active_connections[game_id]:
-                self.active_connections[game_id].remove(websocket)
+        if connections is not None:
 
-            if not self.active_connections[game_id]:
+            if websocket in connections:
+                connections.remove(websocket)
+
+            if not connections:
                 del self.active_connections[game_id]
 
         self.connection_users.pop(websocket, None)
@@ -64,13 +77,16 @@ class ConnectionManager:
     async def broadcast(
         self,
         game_id: int,
-        data: dict
+        data: dict,
     ):
-        connections = self.active_connections.get(game_id, [])
+        # Enum и datetime (phase, phase_ends_at) не сериализуются send_json напрямую,
+        # поэтому сначала приводим всё к JSON-совместимому виду.
+        data = jsonable_encoder(data)
 
         disconnected = []
 
-        for websocket in connections:
+        # list(...) — копия: пока мы ждём await, список могут изменить другие корутины
+        for websocket in list(self.active_connections.get(game_id, [])):
 
             try:
                 await websocket.send_json(data)
@@ -84,8 +100,10 @@ class ConnectionManager:
     async def send_personal(
         self,
         websocket: WebSocket,
-        data: dict
+        data: dict,
     ):
+        data = jsonable_encoder(data)
+
         try:
             await websocket.send_json(data)
 
@@ -97,62 +115,47 @@ class ConnectionManager:
         game_id: int,
         channel: str,
         data: dict,
-        db: Session
+        players_state: PlayersState,
+        game_finished: bool = False,
     ):
-
-        connections = self.active_connections.get(game_id, [])
+        data = jsonable_encoder(data)
 
         disconnected = []
 
-        print("\n========== BROADCAST CHAT ==========")
-        print("GAME ID:", game_id)
-        print("CHANNEL:", channel)
-        print("CONNECTIONS:", len(connections))
-
-        for ws in connections:
-            print(
-                "TARGET USER:",
-                self.connection_users.get(ws)
-            )
-
-        print("====================================\n")
-
-        for websocket in connections:
+        for websocket in list(self.active_connections.get(game_id, [])):
 
             user_id = self.connection_users.get(websocket)
 
-            if not user_id:
+            if user_id is None:
                 continue
 
-            game_player = (
-                db.query(GamePlayer)
-                .filter(
-                    GamePlayer.game_id == game_id,
-                    GamePlayer.user_id == user_id
-                )
-                .first()
-            )
+            state = players_state.get(user_id)
 
-            if not game_player:
+            if state is None:
                 continue
+
+            is_alive, role = state
 
             if channel == "dead":
-                if game_player.is_alive:
+                if is_alive:
                     continue
 
             elif channel == "mafia":
-                if not game_player.is_alive:
+                if not is_alive:
                     continue
 
-                if game_player.role != GameRole.mafia:
+                if role != GameRole.mafia:
                     continue
 
             elif channel == "all":
-                if not game_player.is_alive:
+                # после конца игры общий чат видят все, включая мёртвых
+                if not is_alive and not game_finished:
                     continue
 
+            else:
+                continue
+
             try:
-                print("📤 SEND MESSAGE TO USER:", user_id)
                 await websocket.send_json(data)
 
             except Exception:
@@ -169,26 +172,22 @@ def decode_websocket_token(token: str):
 
     try:
 
-        payload = jwt.decode(
+        return jwt.decode(
             token,
             SECRET_KEY,
-            algorithms=[ALGORITHM]
+            algorithms=[ALGORITHM],
         )
-
-        print("JWT PAYLOAD:", payload)
-
-        return payload
 
     except JWTError as e:
 
-        print("JWT ERROR:", e)
+        logger.warning("JWT error: %s", e)
 
         return None
 
 
 def get_user_by_token(
     db: Session,
-    token: str
+    token: str,
 ):
 
     payload = decode_websocket_token(token)
@@ -199,60 +198,48 @@ def get_user_by_token(
     username = payload.get("sub")
 
     if not username:
-        print("❌ В JWT нет sub")
+        logger.warning("JWT has no 'sub'")
         return None
 
-    user = (
+    return (
         db.query(UserProfile)
         .filter(UserProfile.username == username)
         .first()
     )
 
-    print("USER:", user)
-
-    return user
-
 
 def get_game_player(
     db: Session,
     game_id: int,
-    user_id: int
+    user_id: int,
 ):
 
-    game_player = (
+    return (
         db.query(GamePlayer)
         .filter(
             GamePlayer.game_id == game_id,
-            GamePlayer.user_id == user_id
+            GamePlayer.user_id == user_id,
         )
         .first()
     )
 
-    print("GAME PLAYER:", game_player)
-
-    return game_player
-
 
 def get_game(
     db: Session,
-    game_id: int
+    game_id: int,
 ):
 
-    game = (
+    return (
         db.query(Game)
         .filter(Game.id == game_id)
         .first()
     )
 
-    print("GAME:", game)
-
-    return game
-
 
 def can_send_message(
     game: Game,
     game_player: GamePlayer,
-    channel: str
+    channel: str,
 ):
 
     if game.winner is not None:
@@ -272,7 +259,7 @@ def can_send_message(
 
         return False
 
-    # MAfia CHAT
+    # Чат мафии
     if channel == "mafia":
 
         if game.current_phase != GamePhase.NIGHT:
@@ -286,7 +273,7 @@ def can_send_message(
 
         return True
 
-    # ALL CHAT
+    # Общий чат
     if channel == "all":
 
         if game.current_phase != GamePhase.DAY:
@@ -300,108 +287,91 @@ def can_send_message(
     return False
 
 
+async def reject_connection(
+    websocket: WebSocket,
+    detail: str,
+):
+
+    await manager.send_personal(
+        websocket,
+        {
+            "type": "error",
+            "detail": detail,
+        },
+    )
+
+    try:
+        await websocket.close(code=1008)
+
+    except Exception:
+        pass
+
+
 @chat_router.websocket("/game/{game_id}")
 async def chat_endpoint(
     websocket: WebSocket,
     game_id: int,
-    token: str
+    token: str,
 ):
 
-    db = SessionLocal()
-
-    user = None
-    game_player = None
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    connected = False
 
     try:
 
         await websocket.accept()
 
-        print("\n==============================")
-        print("WEBSOCKET CONNECTED")
-        print("GAME:", game_id)
-        print("==============================")
+        # --- Авторизация: короткая сессия, закрывается до входа в цикл ---
+        game_exists = False
+        is_player = False
 
-        user = get_user_by_token(
-            db,
-            token
-        )
+        with SessionLocal() as db:
 
-        if not user:
+            user = get_user_by_token(db, token)
 
-            await websocket.send_json({
-                "type": "error",
-                "detail": "Invalid token or user not found"
-            })
+            if user is not None:
 
-            await websocket.close(code=1008)
+                user_id = user.id
+                username = user.username
 
+                game_exists = get_game(db, game_id) is not None
+
+                if game_exists:
+                    is_player = get_game_player(db, game_id, user.id) is not None
+
+        if user_id is None:
+            await reject_connection(websocket, "Invalid token or user not found")
             return
 
-        print(
-            f"✅ USER FOUND: "
-            f"id={user.id}, username={user.username}"
-        )
-
-        game = get_game(
-            db,
-            game_id
-        )
-
-        if not game:
-
-            await websocket.send_json({
-                "type": "error",
-                "detail": "Game not found"
-            })
-
-            await websocket.close(code=1008)
-
+        if not game_exists:
+            await reject_connection(websocket, "Game not found")
             return
 
-        game_player = get_game_player(
-            db,
-            game_id,
-            user.id
-        )
-
-        if not game_player:
-
-            await websocket.send_json({
-                "type": "error",
-                "detail": "You are not a player in this game"
-            })
-
-            await websocket.close(code=1008)
-
+        if not is_player:
+            await reject_connection(websocket, "You are not a player in this game")
             return
-
-        print(
-            f"✅ GAME PLAYER FOUND: "
-            f"id={game_player.id}, "
-            f"role={game_player.role}, "
-            f"alive={game_player.is_alive}"
-        )
 
         await manager.connect(
             websocket,
             game_id,
-            user.id
+            user_id,
         )
+
+        connected = True
 
         await manager.broadcast(
             game_id,
             {
                 "type": "user_joined",
-                "user_id": user.id,
-                "username": user.username
-            }
+                "user_id": user_id,
+                "username": username,
+            },
         )
 
         while True:
 
             raw = await websocket.receive_text()
-
-            print("RAW MESSAGE:", raw)
 
             try:
 
@@ -413,8 +383,8 @@ async def chat_endpoint(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Message must be valid JSON"
-                    }
+                        "detail": "Message must be valid JSON",
+                    },
                 )
 
                 continue
@@ -425,42 +395,34 @@ async def chat_endpoint(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Invalid message format"
-                    }
+                        "detail": "Invalid message format",
+                    },
                 )
 
                 continue
 
-            message_type = data.get("type")
-
-            if message_type != "chat":
+            if data.get("type") != "chat":
 
                 await manager.send_personal(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Only chat messages are supported"
-                    }
+                        "detail": "Only chat messages are supported",
+                    },
                 )
 
                 continue
 
             channel = data.get("channel")
 
-            allowed_channels = {
-                "all",
-                "mafia",
-                "dead"
-            }
-
-            if channel not in allowed_channels:
+            if channel not in ALLOWED_CHANNELS:
 
                 await manager.send_personal(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Invalid channel"
-                    }
+                        "detail": "Invalid channel",
+                    },
                 )
 
                 continue
@@ -473,8 +435,8 @@ async def chat_endpoint(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Text must be string"
-                    }
+                        "detail": "Text must be string",
+                    },
                 )
 
                 continue
@@ -487,75 +449,67 @@ async def chat_endpoint(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Message is empty"
-                    }
+                        "detail": "Message is empty",
+                    },
                 )
 
                 continue
 
-            db.expire_all()
-
-            game = get_game(
-                db,
-                game_id
-            )
-
-            game_player = get_game_player(
-                db,
-                game_id,
-                user.id
-            )
-
-            if not game or not game_player:
+            if len(text) > MAX_MESSAGE_LENGTH:
 
                 await manager.send_personal(
                     websocket,
                     {
                         "type": "error",
-                        "detail": "Game or player not found"
-                    }
+                        "detail": f"Message is too long (max {MAX_MESSAGE_LENGTH} characters)",
+                    },
                 )
 
                 continue
 
-            if not can_send_message(
-                game,
-                game_player,
-                channel
-            ):
+            # --- Новая короткая сессия на каждое сообщение: всегда свежее состояние
+            # игры, и соединение с БД не занято, пока мы ждём сеть ---
+            error_detail = None
+            players_state: PlayersState = {}
+            game_finished = False
 
-                if channel == "all":
+            with SessionLocal() as db:
 
-                    detail = (
-                        "Общий чат доступен "
-                        "только живым игрокам днём"
-                    )
+                game = get_game(db, game_id)
+                game_player = get_game_player(db, game_id, user_id)
 
-                elif channel == "mafia":
+                if not game or not game_player:
 
-                    detail = (
-                        "Чат мафии доступен "
-                        "только живым мафиози ночью"
-                    )
+                    error_detail = "Game or player not found"
+
+                elif not can_send_message(game, game_player, channel):
+
+                    error_detail = CHANNEL_ERRORS[channel]
 
                 else:
 
-                    detail = (
-                        "Чат мёртвых доступен "
-                        "только мёртвым игрокам"
-                    )
+                    game_finished = game.winner is not None
+
+                    players_state = {
+                        player.user_id: (player.is_alive, player.role)
+                        for player in (
+                            db.query(GamePlayer)
+                            .filter(GamePlayer.game_id == game_id)
+                            .all()
+                        )
+                    }
+
+            if error_detail is not None:
 
                 await manager.send_personal(
                     websocket,
                     {
                         "type": "error",
-                        "detail": detail
-                    }
+                        "detail": error_detail,
+                    },
                 )
 
                 continue
-
-            message_time = datetime.utcnow().isoformat()
 
             await manager.broadcast_channel(
                 game_id,
@@ -563,34 +517,34 @@ async def chat_endpoint(
                 {
                     "type": "chat",
                     "channel": channel,
-                    "from": user.username,
-                    "user_id": user.id,
+                    "from": username,
+                    "user_id": user_id,
                     "text": text,
-                    "time": message_time
+                    "time": datetime.utcnow().isoformat(),
                 },
-                db
+                players_state,
+                game_finished,
             )
 
     except WebSocketDisconnect:
 
-        print("❌ WEBSOCKET DISCONNECTED")
+        logger.info("ws disconnected: game=%s user=%s", game_id, user_id)
 
-        manager.disconnect(websocket, game_id)
+    except Exception:
 
-        if user:
+        logger.exception("ws error: game=%s user=%s", game_id, user_id)
+
+    finally:
+
+        if connected:
+
+            manager.disconnect(websocket, game_id)
+
             await manager.broadcast(
                 game_id,
                 {
                     "type": "user_left",
-                    "user_id": user.id,
-                    "username": user.username
-                }
+                    "user_id": user_id,
+                    "username": username,
+                },
             )
-
-    except Exception as e:
-        print("WEBSOCKET ERROR:", repr(e))
-
-        manager.disconnect(websocket, game_id)
-
-    finally:
-        db.close()
