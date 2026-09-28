@@ -158,7 +158,7 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
 
     return game_db
 
-async def process_night(db: Session, game: Game,):
+async def process_night(db: Session, game: Game):
 
     if game.current_phase != GamePhase.NIGHT:
         return
@@ -173,29 +173,27 @@ async def process_night(db: Session, game: Game,):
     )
 
     if not round_db:
-
         round_db = (
             db.query(GameRound)
-            .filter(
-                GameRound.game_id == game.id
-            )
-            .order_by(
-                GameRound.round_number.desc()
-            )
+            .filter(GameRound.game_id == game.id)
+            .order_by(GameRound.round_number.desc())
             .first()
         )
 
     if not round_db:
         return
 
-    actions = (db.query(NightAction).filter(NightAction.round_id == round_db.id).all())
+    actions = (
+        db.query(NightAction)
+        .filter(NightAction.round_id == round_db.id)
+        .all()
+    )
 
     kill_action = next(
         (
             action
             for action in actions
-            if action.action_type
-            == NightActionType.KILL
+            if action.action_type == NightActionType.KILL
         ),
         None,
     )
@@ -204,47 +202,54 @@ async def process_night(db: Session, game: Game,):
         (
             action
             for action in actions
-            if action.action_type
-            == NightActionType.HEAL
+            if action.action_type == NightActionType.HEAL
         ),
         None,
     )
+
     killed_user_id = None
+    killed_username = None
+
+    saved_user_id = None
+    doctor_user_id = None
 
     if kill_action:
 
         target = (
             db.query(GamePlayer)
-            .filter(
-                GamePlayer.id == kill_action.target_id,
-
-                GamePlayer.game_id == game.id,
-            )
-            .first()
-        )
+            .filter(GamePlayer.id == kill_action.target_id,
+                GamePlayer.game_id == game.id,).first())
 
         if target and target.is_alive:
 
-            if (
-                not heal_action
-                or heal_action.target_id
-                != kill_action.target_id
-            ):
+            if (heal_action
+                and heal_action.target_id == kill_action.target_id):
+
+                saved_user_id = target.user_id
+
+                doctor = (
+                    db.query(GamePlayer)
+                    .filter(
+                        GamePlayer.id == heal_action.actor_id,
+                        GamePlayer.game_id == game.id,
+                    )
+                    .first()
+                )
+
+                if doctor:
+                    doctor_user_id = doctor.user_id
+
+            else:
 
                 target.is_alive = False
-
-                target.eliminated_round = (round_db.id)
-
-                target.eliminated_reason = (EliminationReason.NIGHT_KILL)
-
-                round_db.killed_player_id = (target.id)
-
-                killed_user_id = (target.user_id)
+                target.eliminated_round = round_db.id
+                target.eliminated_reason = EliminationReason.NIGHT_KILL
+                round_db.killed_player_id = target.id
+                killed_user_id = target.user_id
+                killed_username = target.user.username
 
     game.current_phase = GamePhase.DAY
-
     game.phase_ends_at = (datetime.utcnow() + timedelta(seconds=game.room.day_time))
-
     db.commit()
 
     await manager.broadcast(
@@ -252,9 +257,7 @@ async def process_night(db: Session, game: Game,):
         {
             "type": "phase_changed",
             "phase": game.current_phase,
-            "phase_ends_at": (
-                game.phase_ends_at
-            ),
+            "phase_ends_at": game.phase_ends_at.isoformat(),
         },
     )
 
@@ -265,6 +268,31 @@ async def process_night(db: Session, game: Game,):
             {
                 "type": "player_killed",
                 "user_id": killed_user_id,
+                "username": killed_username,
+                "reason": "NIGHT_KILL",
+                "message": f"{killed_username} был убит этой ночью",
+            },
+        )
+
+    if saved_user_id is not None:
+
+        await manager.send_to_user(
+            game.id,
+            saved_user_id,
+            {
+                "type": "doctor_saved",
+                "message": "Доктор спас вас этой ночью",
+            },
+        )
+
+    if doctor_user_id is not None:
+
+        await manager.send_to_user(
+            game.id,
+            doctor_user_id,
+            {
+                "type": "doctor_heal_success",
+                "message": "Вы спасли игрока этой ночью",
             },
         )
 
@@ -465,15 +493,31 @@ async def delete_game(game_id: int, db: Session = Depends(get_db)):
         "status": "success deleted"
     }
 
-def _visible_role(viewer: GamePlayer, target: GamePlayer, game: Game) -> Optional[GameRole]:
+def _visible_role(
+    viewer: GamePlayer,
+    target: GamePlayer,
+    game: Game
+) -> Optional[GameRole]:
+
     if game.winner is not None:
         return target.role
+
     if viewer.id == target.id:
         return target.role
+
     if not target.is_alive:
         return target.role
-    if viewer.role == GameRole.mafia and target.role == GameRole.mafia:
+
+    if (
+        viewer.role in {
+            GameRole.mafia,
+            GameRole.doctor,
+            GameRole.commissar
+        }
+        and viewer.role == target.role
+    ):
         return target.role
+
     return None
 
 
