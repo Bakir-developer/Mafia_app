@@ -603,9 +603,14 @@ async def process_voting(db: Session, game: Game):
     if game.current_phase != GamePhase.VOTING:
         return None
 
-    round_db = (db.query(GameRound).filter(
+    round_db = (
+        db.query(GameRound)
+        .filter(
             GameRound.game_id == game.id,
-            GameRound.round_number == game.current_round,).first())
+            GameRound.round_number == game.current_round,
+        )
+        .first()
+    )
 
     if not round_db:
         return None
@@ -618,11 +623,18 @@ async def process_voting(db: Session, game: Game):
         .all()
     )
 
+    votes_data = [
+        {
+            "voter_id": vote.voter_id,
+            "target_id": vote.target_id,
+        }
+        for vote in votes
+    ]
+
     if not votes:
 
         game.current_round += 1
-
-        game.current_phase = (GamePhase.NIGHT)
+        game.current_phase = GamePhase.NIGHT
 
         game.phase_ends_at = (
             datetime.utcnow()
@@ -634,31 +646,39 @@ async def process_voting(db: Session, game: Game):
         new_round = GameRound(game_id=game.id, round_number=game.current_round,)
 
         db.add(new_round)
-
         db.commit()
+        db.refresh(game)
+
+        await manager.broadcast(
+            game.id,
+            {
+                "type": "voting_result",
+                "message": "Голосов нет. Никто не выходит.",
+                "tie": False,
+                "eliminated_player_id": None,
+                "votes": votes_data,
+            },
+        )
 
         await manager.broadcast(
             game.id,
             {
                 "type": "phase_changed",
                 "phase": game.current_phase,
-                "phase_ends_at": (
-                    game.phase_ends_at
-                ),
+                "phase_ends_at": game.phase_ends_at.isoformat(),
             },
         )
 
         return {
             "message": "Voting ended without votes",
             "game_id": game.id,
+            "eliminated_player_id": None,
             "winner": None,
-            "next_round": (
-                game.current_round
-            ),
+            "next_round": game.current_round,
             "phase": game.current_phase,
-            "phase_ends_at": (
-                game.phase_ends_at
-            ),
+            "phase_ends_at": game.phase_ends_at,
+            "votes": votes_data,
+            "tie": False,
         }
 
     vote_count = {}
@@ -666,33 +686,90 @@ async def process_voting(db: Session, game: Game):
     for vote in votes:
 
         vote_count[vote.target_id] = (
-            vote_count.get(
-                vote.target_id,
-                0,
-            )
-            + 1
+            vote_count.get(vote.target_id, 0) + 1
         )
 
-    eliminated_player_id = max(vote_count,key=vote_count.get,)
+    max_votes = max(vote_count.values())
+
+    leaders = [
+        player_id
+        for player_id, count in vote_count.items()
+        if count == max_votes
+    ]
+
+    if len(leaders) > 1:
+
+        game.current_round += 1
+        game.current_phase = GamePhase.NIGHT
+
+        game.phase_ends_at = (
+            datetime.utcnow()
+            + timedelta(
+                seconds=game.room.night_time
+            )
+        )
+
+        new_round = GameRound(game_id=game.id, round_number=game.current_round,)
+
+        db.add(new_round)
+        db.commit()
+        db.refresh(game)
+
+        await manager.broadcast(
+            game.id,
+            {
+                "type": "voting_result",
+                "message": "Ничья по голосам. Никто не выходит.",
+                "tie": True,
+                "players": leaders,
+                "eliminated_player_id": None,
+                "votes": votes_data,
+            },
+        )
+
+        await manager.broadcast(
+            game.id,
+            {
+                "type": "phase_changed",
+                "phase": game.current_phase,
+                "phase_ends_at": game.phase_ends_at.isoformat(),
+            },
+        )
+
+        return {
+            "message": "Ничья по голосам. Никто не выходит.",
+            "game_id": game.id,
+            "eliminated_player_id": None,
+            "tie": True,
+            "players": leaders,
+            "votes": votes_data,
+            "winner": None,
+            "next_round": game.current_round,
+            "phase": game.current_phase,
+            "phase_ends_at": game.phase_ends_at,
+        }
+
+    eliminated_player_id = leaders[0]
 
     eliminated_player = (
         db.query(GamePlayer)
         .filter(
             GamePlayer.id == eliminated_player_id,
-            GamePlayer.game_id == game.id,).first())
+            GamePlayer.game_id == game.id,
+        )
+        .first()
+    )
 
     if not eliminated_player:
         return None
 
     eliminated_player.is_alive = False
+    eliminated_player.eliminated_round = round_db.id
+    eliminated_player.eliminated_reason = EliminationReason.VOTE
 
-    eliminated_player.eliminated_round = (round_db.id)
+    round_db.eliminated_player_id = eliminated_player.id
 
-    eliminated_player.eliminated_reason = (EliminationReason.VOTE)
-
-    round_db.eliminated_player_id = (eliminated_player.id)
-
-    eliminated_user_id = (eliminated_player.user_id)
+    eliminated_user_id = eliminated_player.user_id
 
     alive_players = (
         db.query(GamePlayer)
@@ -715,17 +792,13 @@ async def process_voting(db: Session, game: Game):
         if player.role != GameRole.mafia
     )
 
-    if mafia_count >= civilian_count:
+    if mafia_count > civilian_count:
 
-        game.winner = (GameWinner.MAFIA)
-
-        game.current_phase = (GamePhase.DAY)
-
+        game.winner = GameWinner.MAFIA
+        game.current_phase = GamePhase.DAY
         game.phase_ends_at = None
-
-        game.finished_at = (datetime.utcnow())
-
-        game.room.status = (RoomStatus.FINISHED)
+        game.finished_at = datetime.utcnow()
+        game.room.status = RoomStatus.FINISHED
 
         check_game_achievements(db, game.id,)
 
@@ -734,8 +807,20 @@ async def process_voting(db: Session, game: Game):
         await manager.broadcast(
             game.id,
             {
+                "type": "voting_result",
+                "message": "Игрок исключён голосованием.",
+                "tie": False,
+                "eliminated_player_id": eliminated_player.id,
+                "votes": votes_data,
+            },
+        )
+
+        await manager.broadcast(
+            game.id,
+            {
                 "type": "player_killed",
                 "user_id": eliminated_user_id,
+                "reason": "VOTE",
             },
         )
 
@@ -752,36 +837,43 @@ async def process_voting(db: Session, game: Game):
         return {
             "message": "Mafia wins",
             "game_id": game.id,
-            "eliminated_player_id": (
-                eliminated_player.id
-            ),
-
+            "eliminated_player_id": eliminated_player.id,
             "winner": game.winner,
             "phase": game.current_phase,
             "phase_ends_at": None,
+            "votes": votes_data,
+            "tie": False,
         }
 
     if mafia_count == 0:
 
-        game.winner = (GameWinner.CITIZENS)
-
-        game.current_phase = (GamePhase.DAY)
-
+        game.winner = GameWinner.CITIZENS
+        game.current_phase = GamePhase.DAY
         game.phase_ends_at = None
+        game.finished_at = datetime.utcnow()
+        game.room.status = RoomStatus.FINISHED
 
-        game.finished_at = (datetime.utcnow())
-
-        game.room.status = (RoomStatus.FINISHED)
-
-        check_game_achievements(db,game.id,)
+        check_game_achievements(db, game.id,)
 
         db.commit()
 
         await manager.broadcast(
             game.id,
             {
+                "type": "voting_result",
+                "message": "Игрок исключён голосованием.",
+                "tie": False,
+                "eliminated_player_id": eliminated_player.id,
+                "votes": votes_data,
+            },
+        )
+
+        await manager.broadcast(
+            game.id,
+            {
                 "type": "player_killed",
                 "user_id": eliminated_user_id,
+                "reason": "VOTE",
             },
         )
 
@@ -798,16 +890,16 @@ async def process_voting(db: Session, game: Game):
         return {
             "message": "Citizens win",
             "game_id": game.id,
-            "eliminated_player_id": (
-                eliminated_player.id
-            ),
+            "eliminated_player_id": eliminated_player.id,
             "winner": game.winner,
             "phase": game.current_phase,
             "phase_ends_at": None,
+            "votes": votes_data,
+            "tie": False,
         }
 
     game.current_round += 1
-    game.current_phase = (GamePhase.NIGHT)
+    game.current_phase = GamePhase.NIGHT
 
     game.phase_ends_at = (
         datetime.utcnow()
@@ -829,8 +921,20 @@ async def process_voting(db: Session, game: Game):
     await manager.broadcast(
         game.id,
         {
+            "type": "voting_result",
+            "message": "Игрок исключён голосованием.",
+            "tie": False,
+            "eliminated_player_id": eliminated_player.id,
+            "votes": votes_data,
+        },
+    )
+
+    await manager.broadcast(
+        game.id,
+        {
             "type": "player_killed",
             "user_id": eliminated_user_id,
+            "reason": "VOTE",
         },
     )
 
@@ -839,40 +943,26 @@ async def process_voting(db: Session, game: Game):
         {
             "type": "phase_changed",
             "phase": game.current_phase,
-            "phase_ends_at": (
-                game.phase_ends_at
-            ),
+            "phase_ends_at": game.phase_ends_at.isoformat(),
         },
     )
 
     return {
         "message": "Voting ended",
         "game_id": game.id,
-        "eliminated_player_id": (
-            eliminated_player.id
-        ),
-
+        "eliminated_player_id": eliminated_player.id,
         "winner": None,
-        "next_round": (
-            game.current_round
-        ),
-
+        "next_round": game.current_round,
         "phase": game.current_phase,
-        "phase_ends_at": (
-            game.phase_ends_at
-        ),
+        "phase_ends_at": game.phase_ends_at,
+        "votes": votes_data,
+        "tie": False,
     }
 
 @game_router.post("/end-voting/{game_id}")
 async def end_voting(game_id: int, db: Session = Depends(get_db)):
 
-    game = (
-        db.query(Game)
-        .filter(
-            Game.id == game_id
-        )
-        .first()
-    )
+    game = (db.query(Game).filter(Game.id == game_id).first())
 
     if not game:
 
@@ -892,6 +982,98 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
 
     return result
 
+async def night_actions_completed(db: Session, game: Game) -> bool:
+    if game.current_phase != GamePhase.NIGHT:
+        return False
+
+    round_db = (
+        db.query(GameRound)
+        .filter(
+            GameRound.game_id == game.id,
+            GameRound.round_number == game.current_round,
+        )
+        .first()
+    )
+
+    if not round_db:
+        return False
+
+    alive_players = (
+        db.query(GamePlayer)
+        .filter(
+            GamePlayer.game_id == game.id,
+            GamePlayer.is_alive == True,
+        )
+        .all()
+    )
+
+    actions = (
+        db.query(NightAction)
+        .filter(
+            NightAction.round_id == round_db.id
+        )
+        .all()
+    )
+
+    alive_mafia = any(
+        player.role == GameRole.mafia
+        for player in alive_players
+    )
+
+    alive_doctor = any(
+        player.role == GameRole.doctor
+        for player in alive_players
+    )
+
+    alive_commissar = any(
+        player.role == GameRole.commissar
+        for player in alive_players
+    )
+
+    mafia_acted = any(
+        action.action_type == NightActionType.KILL
+        and any(
+            player.id == action.actor_id
+            and player.is_alive
+            and player.role == GameRole.mafia
+            for player in alive_players
+        )
+        for action in actions
+    )
+
+    doctor_acted = any(
+        action.action_type == NightActionType.HEAL
+        and any(
+            player.id == action.actor_id
+            and player.is_alive
+            and player.role == GameRole.doctor
+            for player in alive_players
+        )
+        for action in actions
+    )
+
+    commissar_acted = any(
+        action.action_type == NightActionType.CHECK
+        and any(
+            player.id == action.actor_id
+            and player.is_alive
+            and player.role == GameRole.commissar
+            for player in alive_players
+        )
+        for action in actions
+    )
+
+    if alive_mafia and not mafia_acted:
+        return False
+
+    if alive_doctor and not doctor_acted:
+        return False
+
+    if alive_commissar and not commissar_acted:
+        return False
+
+    return True
+
 async def game_scheduler():
 
     while True:
@@ -900,8 +1082,14 @@ async def game_scheduler():
 
         try:
 
-            games = (db.query(Game).filter(
-                    Game.winner.is_(None), Game.phase_ends_at.isnot(None),).all())
+            games = (
+                db.query(Game)
+                .filter(
+                    Game.winner.is_(None),
+                    Game.phase_ends_at.isnot(None),
+                )
+                .all()
+            )
 
             now = datetime.utcnow()
 
@@ -910,20 +1098,34 @@ async def game_scheduler():
                 if not game.phase_ends_at:
                     continue
 
-                if now < game.phase_ends_at:
+                if game.current_phase == GamePhase.NIGHT:
+                    actions_completed = await night_actions_completed(db, game,)
+
+                    if actions_completed:
+
+                        await process_night(db, game,)
+
+                        continue
+
+                    if now >= game.phase_ends_at:
+
+                        await process_night(db, game,)
+
                     continue
 
-                if game.current_phase == GamePhase.NIGHT:
+                if game.current_phase == GamePhase.DAY:
 
-                    await process_night(db, game,)
+                    if now >= game.phase_ends_at:
 
-                elif game.current_phase == GamePhase.DAY:
+                        await process_start_voting(db, game,)
 
-                    await process_start_voting(db,game,)
+                    continue
 
-                elif game.current_phase == GamePhase.VOTING:
+                if game.current_phase == GamePhase.VOTING:
 
-                    await process_voting(db,game,)
+                    if now >= game.phase_ends_at:
+
+                        await process_voting(db, game,)
 
         except Exception as e:
             print(f"GAME SCHEDULER ERROR: {e}")

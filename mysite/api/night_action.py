@@ -62,6 +62,9 @@ async def create_night_action(
     if game.current_phase != GamePhase.NIGHT:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="not night phase")
 
+    if round_db.round_number != game.current_round:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="this is not the current round")
+
     expected_role = {
         NightActionType.KILL: GameRole.mafia,
         NightActionType.HEAL: GameRole.doctor,
@@ -114,13 +117,90 @@ async def detail_night_action(action_id: int, db: Session = Depends(get_db)):
 
 
 @vote_router.post('/create', response_model=VoteDetailSchema)
-async def create_vote(vote_data: VoteCreateSchema, db: Session = Depends(get_db)):
-    _check_round_and_players(db, vote_data.round_id, vote_data.voter_id, vote_data.target_id)
+async def create_vote(vote_data: VoteCreateSchema, db: Session = Depends(get_db),
+                      current_user: UserProfile = Depends(get_current_user),):
+    round_db = _check_round_and_players(db, vote_data.round_id,vote_data.voter_id, vote_data.target_id,)
 
+    game = (db.query(Game).filter(Game.id == round_db.game_id).first())
+
+    if not game:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="game not found",
+        )
+
+    if game.current_phase != GamePhase.VOTING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="voting is not active",
+        )
+
+    voter = (
+        db.query(GamePlayer)
+        .filter(
+            GamePlayer.id == vote_data.voter_id,
+            GamePlayer.game_id == game.id,
+        )
+        .first()
+    )
+
+    target = (
+        db.query(GamePlayer)
+        .filter(
+            GamePlayer.id == vote_data.target_id,
+            GamePlayer.game_id == game.id,
+        )
+        .first()
+    )
+
+    if not voter:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="voter not found",
+        )
+
+    if not target:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="target not found",
+        )
+
+    if voter.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="not your player",
+        )
+
+    if not voter.is_alive:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="dead players cannot vote",
+        )
+
+    if not target.is_alive:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cannot vote for dead player",
+        )
+
+    if voter.id == target.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="cannot vote for yourself",
+        )
+
+    if round_db.round_number != game.current_round:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="this is not the current round",
+        )
 
     existing_vote = (
         db.query(Vote)
-        .filter(Vote.round_id == vote_data.round_id, Vote.voter_id == vote_data.voter_id)
+        .filter(
+            Vote.round_id == vote_data.round_id,
+            Vote.voter_id == vote_data.voter_id,
+        )
         .first()
     )
     if existing_vote:
@@ -129,7 +209,12 @@ async def create_vote(vote_data: VoteCreateSchema, db: Session = Depends(get_db)
         db.refresh(existing_vote)
         return existing_vote
 
-    vote_db = Vote(**vote_data.dict())
+    vote_db = Vote(
+        round_id=vote_data.round_id,
+        voter_id=vote_data.voter_id,
+        target_id=vote_data.target_id,
+    )
+
     db.add(vote_db)
     db.commit()
     db.refresh(vote_db)

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from mysite.db.database import SessionLocal
 from mysite.db.models import UserProfile, UserStatistic
-from mysite.db.schema import (UserProfileSchema, UserProfileListSchema, UserProfileDetailSchema)
+from mysite.db.schema import (UserProfileSchema, UserProfileListSchema, UserProfileDetailSchema, UserProfileUpdateSchema)
 from typing import List
 
 user_router = APIRouter(prefix='/user', tags=['User'])
@@ -30,13 +30,18 @@ async def detail_user(user_id: int, db: Session = Depends(get_db)):
     return user_db
 
 @user_router.put('/update')
-async def update_user(user_id: int, user_data: UserProfileSchema, db: Session = Depends(get_db)):
+async def update_user(user_id: int, user_data: UserProfileUpdateSchema, db: Session = Depends(get_db)):
     user_db = db.query(UserProfile).filter(UserProfile.id == user_id).first()
 
     if not user_db:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail='User not found'
+        )
 
-    for user_key, user_value in user_data.dict().items():
+    update_data = user_data.dict(exclude_unset=True)
+
+    for user_key, user_value in update_data.items():
         setattr(user_db, user_key, user_value)
 
     db.commit()
