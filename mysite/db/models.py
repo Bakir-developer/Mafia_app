@@ -33,6 +33,19 @@ class UserProfile(Base):
     group: Mapped[List['Group']] = relationship(back_populates='group_member', cascade='all, delete-orphan')
     chatgroup: Mapped[List['Chatgroup']] = relationship(back_populates='group_user', cascade='all, delete-orphan')
 
+
+class Friend(Base):
+    __tablename__ = 'friend'
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('user_profile.id'), nullable=False)
+    friend_id: Mapped[int] = mapped_column(ForeignKey('user_profile.id'), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    user: Mapped['UserProfile'] = relationship('UserProfile', foreign_keys=[user_id])
+    friend: Mapped['UserProfile'] = relationship('UserProfile', foreign_keys=[friend_id])
+
+    __table_args__ = (UniqueConstraint('user_id', 'friend_id', name='uq_user_friend'),)
+
 class RefreshToken(Base):
     __tablename__ = 'refresh_token'
 
@@ -205,6 +218,7 @@ class GamePlayer(Base):
     )
 
     has_sent_last_words: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_words: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (UniqueConstraint('game_id', 'user_id', name='uq_game_player_user'),)
 

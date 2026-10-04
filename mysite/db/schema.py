@@ -19,7 +19,6 @@ class UserProfileUpdateSchema(BaseModel):
     email: Optional[EmailStr] = None
     age: Optional[int] = None
     profile_image: Optional[str] = None
-    password: Optional[str] = None
 
 class UserProfileListSchema(BaseModel):
     id: int
@@ -61,6 +60,13 @@ class UserStatisticSchema(BaseModel):
     detective_games: int
     doctor_games: int
 
+class FriendCreateSchema(BaseModel):
+    friend_id: int
+
+class FriendListSchema(BaseModel):
+    id: int
+    username: str
+    profile_image: Optional[str] = None
 
 class RoomCreateSchema(BaseModel):
     room_name: str

@@ -1,8 +1,8 @@
 """empty message
 
-Revision ID: fa58b7157afb
+Revision ID: 56e8f6d2d51f
 Revises: 
-Create Date: 2026-09-24 16:48:30.378415
+Create Date: 2026-10-04 00:58:05.664718
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = 'fa58b7157afb'
+revision: str = '56e8f6d2d51f'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -152,6 +152,7 @@ def upgrade() -> None:
     sa.Column('eliminated_round', sa.Integer(), nullable=True),
     sa.Column('eliminated_reason', sa.Enum('NIGHT_KILL', 'VOTE', name='eliminationreason'), nullable=True),
     sa.Column('has_sent_last_words', sa.Boolean(), nullable=False),
+    sa.Column('last_words', sa.Text(), nullable=True),
     sa.ForeignKeyConstraint(['game_id'], ['game.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user_profile.id'], ),
     sa.PrimaryKeyConstraint('id'),
