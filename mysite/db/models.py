@@ -68,6 +68,8 @@ class UserStatistic(Base):
     citizen_games: Mapped[int] = mapped_column(Integer, default=0)
     detective_games: Mapped[int] = mapped_column(Integer, default=0)
     doctor_games: Mapped[int] = mapped_column(Integer, default=0)
+    coins: Mapped[int] = mapped_column(Integer, default=0)
+    protections: Mapped[int] = mapped_column(Integer, default=0)
 
     user: Mapped['UserProfile'] = relationship('UserProfile', back_populates='profile')
 

@@ -11,7 +11,7 @@ from mysite.db.database import SessionLocal
 from mysite.api.dependencies import get_current_user
 from mysite.db.models import UserProfile, GameRole
 from mysite.db.models import (Game, GamePlayer, GameRound, NightAction, Room, Vote, RoomPlayer,
-                              RoomStatus, GameRole, NightActionType, EliminationReason,)
+                              RoomStatus, GameRole, NightActionType, EliminationReason, UserStatistic)
 from mysite.db.schema import (GameCreateSchema, GameListSchema, GameDetailSchema, GamePlayerListSchema,
                               GamePlayerDetailSchema, GameRoundListSchema, GameRoundDetailSchema, GamePhase, GameWinner,)
 
@@ -78,27 +78,19 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
     room_db = (db.query(Room).filter(Room.id == game_data.room_id).first())
 
     if not room_db:
-        raise HTTPException(
-            status_code=404,
-            detail="room not found",
-        )
+        raise HTTPException(status_code=404, detail="room not found",)
 
     existing_game = (db.query(Game).filter(Game.room_id == game_data.room_id).first())
 
     if existing_game:
-        raise HTTPException(
-            status_code=400,
-            detail="game already exists for this room",
-        )
+        raise HTTPException(status_code=400, detail="game already exists for this room",)
 
     room_players = (db.query(RoomPlayer).filter(RoomPlayer.room_id == game_data.room_id).all())
 
     total_players = len(room_players)
 
     if total_players < MIN_PLAYERS:
-        raise HTTPException(
-            status_code=400,
-            detail=(
+        raise HTTPException(status_code=400,detail=(
                 f"need at least "
                 f"{MIN_PLAYERS} players to start a game"
             ),
@@ -158,36 +150,44 @@ async def create_game(game_data: GameCreateSchema, db: Session = Depends(get_db)
 
     return game_db
 
+@game_router.post("/exchange-protection")
+async def exchange_protection(db: Session = Depends(get_db), current_user: UserProfile = Depends(get_current_user),):
+    statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == current_user.id).first())
+
+    if not statistic:
+        raise HTTPException(status_code=404, detail="statistics not found",)
+
+    if statistic.coins < 100:
+        raise HTTPException(status_code=400, detail="Need 100 coins to get 1 protection",)
+
+    statistic.coins -= 100
+    statistic.protections += 1
+
+    db.commit()
+    db.refresh(statistic)
+
+    return {
+        "message": "100 coins exchanged for 1 protection",
+        "coins": statistic.coins,
+        "protections": statistic.protections,
+    }
+
 async def process_night(db: Session, game: Game):
 
     if game.current_phase != GamePhase.NIGHT:
         return
 
-    round_db = (
-        db.query(GameRound)
-        .filter(
-            GameRound.game_id == game.id,
-            GameRound.round_number == game.current_round,
-        )
-        .first()
-    )
+    round_db = (db.query(GameRound).filter(GameRound.game_id == game.id,
+                                           GameRound.round_number == game.current_round,).first())
 
     if not round_db:
-        round_db = (
-            db.query(GameRound)
-            .filter(GameRound.game_id == game.id)
-            .order_by(GameRound.round_number.desc())
-            .first()
-        )
+        round_db = (db.query(GameRound).filter(GameRound.game_id == game.id)
+                    .order_by(GameRound.round_number.desc()).first())
 
     if not round_db:
         return
 
-    actions = (
-        db.query(NightAction)
-        .filter(NightAction.round_id == round_db.id)
-        .all()
-    )
+    actions = (db.query(NightAction).filter(NightAction.round_id == round_db.id).all())
 
     kill_action = next(
         (
@@ -207,18 +207,27 @@ async def process_night(db: Session, game: Game):
         None,
     )
 
+    check_action = next(
+        (
+            action
+            for action in actions
+            if action.action_type == NightActionType.CHECK
+        ),
+        None,
+    )
+
     killed_user_id = None
     killed_username = None
 
     saved_user_id = None
     doctor_user_id = None
 
+    protection_saved_user_id = None
+
     if kill_action:
 
-        target = (
-            db.query(GamePlayer)
-            .filter(GamePlayer.id == kill_action.target_id,
-                GamePlayer.game_id == game.id,).first())
+        target = (db.query(GamePlayer).filter(GamePlayer.id == kill_action.target_id,
+                                              GamePlayer.game_id == game.id,).first())
 
         if target and target.is_alive:
 
@@ -227,20 +236,45 @@ async def process_night(db: Session, game: Game):
 
                 saved_user_id = target.user_id
 
-                doctor = (
-                    db.query(GamePlayer)
-                    .filter(
-                        GamePlayer.id == heal_action.actor_id,
-                        GamePlayer.game_id == game.id,
-                    )
-                    .first()
-                )
+                doctor = (db.query(GamePlayer).filter(GamePlayer.id == heal_action.actor_id,
+                                                      GamePlayer.game_id == game.id,).first())
 
                 if doctor:
                     doctor_user_id = doctor.user_id
 
             else:
+                statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == target.user_id).first())
 
+                if statistic and statistic.protections > 0:
+                    statistic.protections -= 1
+                    protection_saved_user_id = target.user_id
+
+                else:
+                    target.is_alive = False
+                    target.eliminated_round = round_db.id
+                    target.eliminated_reason = EliminationReason.NIGHT_KILL
+                    round_db.killed_player_id = target.id
+                    killed_user_id = target.user_id
+                    killed_username = target.user.username
+
+    game.current_phase = GamePhase.DAY
+    game.phase_ends_at = (datetime.utcnow() + timedelta(seconds=game.room.day_time))
+    db.commit()
+
+    if check_action:
+
+        target = (db.query(GamePlayer).filter(GamePlayer.id == check_action.target_id,
+                                              GamePlayer.game_id == game.id,).first())
+
+        if target and target.is_alive and target.role == GameRole.mafia:
+
+            statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == target.user_id).first())
+
+            if statistic and statistic.protections > 0:
+                statistic.protections -= 1
+                protection_saved_user_id = target.user_id
+
+            else:
                 target.is_alive = False
                 target.eliminated_round = round_db.id
                 target.eliminated_reason = EliminationReason.NIGHT_KILL
@@ -248,8 +282,6 @@ async def process_night(db: Session, game: Game):
                 killed_user_id = target.user_id
                 killed_username = target.user.username
 
-    game.current_phase = GamePhase.DAY
-    game.phase_ends_at = (datetime.utcnow() + timedelta(seconds=game.room.day_time))
     db.commit()
 
     await manager.broadcast(
@@ -276,8 +308,7 @@ async def process_night(db: Session, game: Game):
 
     if saved_user_id is not None:
 
-        await manager.send_to_user(
-            game.id,
+        await manager.send_to_user(game.id,
             saved_user_id,
             {
                 "type": "doctor_saved",
@@ -285,11 +316,22 @@ async def process_night(db: Session, game: Game):
             },
         )
 
+    if protection_saved_user_id is not None:
+
+        statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == protection_saved_user_id).first())
+
+        await manager.send_to_user(game.id,
+            protection_saved_user_id,
+            {
+                "type": "protection_used",
+                "message": "Вас спасла накопленная защита.",
+                "protections_left": statistic.protections if statistic else 0,
+            },
+        )
+
     if doctor_user_id is not None:
 
-        await manager.send_to_user(
-            game.id,
-            doctor_user_id,
+        await manager.send_to_user(game.id, doctor_user_id,
             {
                 "type": "doctor_heal_success",
                 "message": "Вы спасли игрока этой ночью",
@@ -302,30 +344,18 @@ async def end_night(game_id: int, db: Session = Depends(get_db),):
     game = (db.query(Game).filter(Game.id == game_id).first())
 
     if not game:
-        raise HTTPException(
-            status_code=404,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=404, detail="game not found",)
 
     if game.current_phase != GamePhase.NIGHT:
 
-        raise HTTPException(
-            status_code=400,
-            detail="game is not in NIGHT phase",
-        )
+        raise HTTPException(status_code=400, detail="game is not in NIGHT phase",)
 
     await process_night(db, game,)
 
     db.refresh(game)
 
-    round_db = (
-        db.query(GameRound)
-        .filter(
-            GameRound.game_id == game.id,
-            GameRound.round_number == game.current_round,
-        )
-        .first()
-    )
+    round_db = (db.query(GameRound).filter(GameRound.game_id == game.id,
+                                           GameRound.round_number == game.current_round,).first())
 
     return {
         "message": "Night ended",
@@ -355,12 +385,7 @@ async def process_start_voting(db: Session, game: Game,):
 
     game.current_phase = GamePhase.VOTING
 
-    game.phase_ends_at = (
-        datetime.utcnow()
-        + timedelta(
-            seconds=VOTING_TIME
-        )
-    )
+    game.phase_ends_at = (datetime.utcnow() + timedelta(seconds=VOTING_TIME))
 
     db.commit()
 
@@ -381,17 +406,11 @@ async def start_voting(game_id: int, db: Session = Depends(get_db)):
     game = (db.query(Game).filter(Game.id == game_id).first())
 
     if not game:
-        raise HTTPException(
-            status_code=404,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=404, detail="game not found",)
 
     if game.current_phase != GamePhase.DAY:
 
-        raise HTTPException(
-            status_code=400,
-            detail="game is not in DAY phase",
-        )
+        raise HTTPException(status_code=400, detail="game is not in DAY phase",)
 
     await process_start_voting(db, game,)
 
@@ -419,10 +438,7 @@ async def detail_game(game_id: int, db: Session = Depends(get_db)):
 
     if not game_db:
 
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game not found",)
 
     return game_db
 
@@ -433,13 +449,9 @@ async def update_game(game_id: int, game_data: GameUpdateSchema, db: Session = D
 
     if not game_db:
 
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game not found",)
 
     data = game_data.dict(exclude_unset=True)
-
     data.pop("current_phase",None,)
 
     for key, value in data.items():
@@ -447,14 +459,11 @@ async def update_game(game_id: int, game_data: GameUpdateSchema, db: Session = D
         setattr(game_db, key, value,)
 
     if game_data.winner is not None:
-
         game_db.room.status = (RoomStatus.FINISHED)
-
         game_db.finished_at = (datetime.utcnow())
-
         game_db.phase_ends_at = None
-
         check_game_achievements(db, game_db.id)
+        give_win_reward(db, game_db)
 
     db.commit()
 
@@ -481,10 +490,7 @@ async def delete_game(game_id: int, db: Session = Depends(get_db)):
 
     if not game_db:
 
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game not found",)
 
     db.delete(game_db)
     db.commit()
@@ -493,11 +499,7 @@ async def delete_game(game_id: int, db: Session = Depends(get_db)):
         "status": "success deleted"
     }
 
-def _visible_role(
-    viewer: GamePlayer,
-    target: GamePlayer,
-    game: Game
-) -> Optional[GameRole]:
+def _visible_role(viewer: GamePlayer, target: GamePlayer, game: Game) -> Optional[GameRole]:
 
     if game.winner is not None:
         return target.role
@@ -534,18 +536,13 @@ async def list_game_player(game_id: Optional[int] = None, db: Session = Depends(
         return players
 
     game = db.query(Game).filter(Game.id == players[0].game_id).first()
-    viewer = (
-        db.query(GamePlayer)
-        .filter(GamePlayer.game_id == players[0].game_id, GamePlayer.user_id == current_user.id)
-        .first()
-    )
+    viewer = (db.query(GamePlayer).filter(GamePlayer.game_id == players[0].game_id,
+                                          GamePlayer.user_id == current_user.id).first())
 
     result = []
     for p in players:
         visible_role = _visible_role(viewer, p, game) if viewer else (p.role if game.winner else None)
-        result.append(
-            GamePlayerListSchema(id=p.id, user_id=p.user_id, role=visible_role, is_alive=p.is_alive)
-        )
+        result.append(GamePlayerListSchema(id=p.id, user_id=p.user_id, role=visible_role, is_alive=p.is_alive))
     return result
 
 @game_player_router.get("/detail", response_model=GamePlayerDetailSchema)
@@ -556,9 +553,8 @@ async def detail_game_player(game_player_id: int,db: Session = Depends(get_db),
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game player not found")
 
     game = db.query(Game).filter(Game.id == target.game_id).first()
-    viewer = (db.query(GamePlayer)
-        .filter(GamePlayer.game_id == target.game_id, GamePlayer.user_id == current_user.id)
-        .first())
+    viewer = (db.query(GamePlayer).filter(GamePlayer.game_id == target.game_id,
+                                          GamePlayer.user_id == current_user.id).first())
     if not viewer:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="you are not in this game")
 
@@ -591,10 +587,7 @@ async def detail_game_round(round_id: int, db: Session = Depends(get_db)):
 
     if not round_db:
 
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="game round not found",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="game round not found",)
 
     return round_db
 
@@ -603,25 +596,13 @@ async def process_voting(db: Session, game: Game):
     if game.current_phase != GamePhase.VOTING:
         return None
 
-    round_db = (
-        db.query(GameRound)
-        .filter(
-            GameRound.game_id == game.id,
-            GameRound.round_number == game.current_round,
-        )
-        .first()
-    )
+    round_db = (db.query(GameRound).filter(GameRound.game_id == game.id,
+                                           GameRound.round_number == game.current_round,).first())
 
     if not round_db:
         return None
 
-    votes = (
-        db.query(Vote)
-        .filter(
-            Vote.round_id == round_db.id
-        )
-        .all()
-    )
+    votes = (db.query(Vote).filter(Vote.round_id == round_db.id).all())
 
     votes_data = [
         {
@@ -636,12 +617,7 @@ async def process_voting(db: Session, game: Game):
         game.current_round += 1
         game.current_phase = GamePhase.NIGHT
 
-        game.phase_ends_at = (
-            datetime.utcnow()
-            + timedelta(
-                seconds=game.room.night_time
-            )
-        )
+        game.phase_ends_at = (datetime.utcnow()+ timedelta(seconds=game.room.night_time))
 
         new_round = GameRound(game_id=game.id, round_number=game.current_round,)
 
@@ -685,9 +661,7 @@ async def process_voting(db: Session, game: Game):
 
     for vote in votes:
 
-        vote_count[vote.target_id] = (
-            vote_count.get(vote.target_id, 0) + 1
-        )
+        vote_count[vote.target_id] = (vote_count.get(vote.target_id, 0) + 1)
 
     max_votes = max(vote_count.values())
 
@@ -702,12 +676,7 @@ async def process_voting(db: Session, game: Game):
         game.current_round += 1
         game.current_phase = GamePhase.NIGHT
 
-        game.phase_ends_at = (
-            datetime.utcnow()
-            + timedelta(
-                seconds=game.room.night_time
-            )
-        )
+        game.phase_ends_at = (datetime.utcnow() + timedelta(seconds=game.room.night_time))
 
         new_round = GameRound(game_id=game.id, round_number=game.current_round,)
 
@@ -751,14 +720,8 @@ async def process_voting(db: Session, game: Game):
 
     eliminated_player_id = leaders[0]
 
-    eliminated_player = (
-        db.query(GamePlayer)
-        .filter(
-            GamePlayer.id == eliminated_player_id,
-            GamePlayer.game_id == game.id,
-        )
-        .first()
-    )
+    eliminated_player = (db.query(GamePlayer).filter(GamePlayer.id == eliminated_player_id,
+                                                     GamePlayer.game_id == game.id,).first())
 
     if not eliminated_player:
         return None
@@ -771,14 +734,8 @@ async def process_voting(db: Session, game: Game):
 
     eliminated_user_id = eliminated_player.user_id
 
-    alive_players = (
-        db.query(GamePlayer)
-        .filter(
-            GamePlayer.game_id == game.id,
-            GamePlayer.is_alive == True,
-        )
-        .all()
-    )
+    alive_players = (db.query(GamePlayer).filter(GamePlayer.game_id == game.id,
+                                                 GamePlayer.is_alive == True,).all())
 
     mafia_count = sum(
         1
@@ -800,9 +757,9 @@ async def process_voting(db: Session, game: Game):
         game.finished_at = datetime.utcnow()
         game.room.status = RoomStatus.FINISHED
 
-        check_game_achievements(db, game.id,)
+        check_game_achievements(db, game.id)
+        give_win_reward(db, game)
 
-        db.commit()
 
         await manager.broadcast(
             game.id,
@@ -853,9 +810,9 @@ async def process_voting(db: Session, game: Game):
         game.finished_at = datetime.utcnow()
         game.room.status = RoomStatus.FINISHED
 
-        check_game_achievements(db, game.id,)
+        check_game_achievements(db, game.id)
+        give_win_reward(db, game)
 
-        db.commit()
 
         await manager.broadcast(
             game.id,
@@ -908,10 +865,7 @@ async def process_voting(db: Session, game: Game):
         )
     )
 
-    new_round = GameRound(
-        game_id=game.id,
-        round_number=game.current_round,
-    )
+    new_round = GameRound(game_id=game.id, round_number=game.current_round,)
 
     db.add(new_round)
 
@@ -966,17 +920,11 @@ async def end_voting(game_id: int, db: Session = Depends(get_db)):
 
     if not game:
 
-        raise HTTPException(
-            status_code=404,
-            detail="game not found",
-        )
+        raise HTTPException(status_code=404, detail="game not found",)
 
     if game.current_phase != GamePhase.VOTING:
 
-        raise HTTPException(
-            status_code=400,
-            detail="game is not in VOTING phase",
-        )
+        raise HTTPException(status_code=400, detail="game is not in VOTING phase",)
 
     result = await process_voting(db, game,)
 
@@ -986,34 +934,16 @@ async def night_actions_completed(db: Session, game: Game) -> bool:
     if game.current_phase != GamePhase.NIGHT:
         return False
 
-    round_db = (
-        db.query(GameRound)
-        .filter(
-            GameRound.game_id == game.id,
-            GameRound.round_number == game.current_round,
-        )
-        .first()
-    )
+    round_db = (db.query(GameRound).filter(GameRound.game_id == game.id,
+                                           GameRound.round_number == game.current_round,).first())
 
     if not round_db:
         return False
 
-    alive_players = (
-        db.query(GamePlayer)
-        .filter(
-            GamePlayer.game_id == game.id,
-            GamePlayer.is_alive == True,
-        )
-        .all()
-    )
+    alive_players = (db.query(GamePlayer).filter(GamePlayer.game_id == game.id,
+                                                 GamePlayer.is_alive == True,).all())
 
-    actions = (
-        db.query(NightAction)
-        .filter(
-            NightAction.round_id == round_db.id
-        )
-        .all()
-    )
+    actions = (db.query(NightAction).filter(NightAction.round_id == round_db.id).all())
 
     alive_mafia = any(
         player.role == GameRole.mafia
@@ -1082,14 +1012,8 @@ async def game_scheduler():
 
         try:
 
-            games = (
-                db.query(Game)
-                .filter(
-                    Game.winner.is_(None),
-                    Game.phase_ends_at.isnot(None),
-                )
-                .all()
-            )
+            games = (db.query(Game).filter(Game.winner.is_(None),
+                                           Game.phase_ends_at.isnot(None),).all())
 
             now = datetime.utcnow()
 
@@ -1134,3 +1058,28 @@ async def game_scheduler():
         finally:
             db.close()
         await asyncio.sleep(1)
+
+def give_win_reward(db: Session, game: Game):
+
+    if not game.winner:
+        return
+
+    if game.winner == GameWinner.MAFIA:
+        winning_players = (db.query(GamePlayer).filter(GamePlayer.game_id == game.id,
+                                                       GamePlayer.role == GameRole.mafia,).all())
+    else:
+        winning_players = (db.query(GamePlayer).filter(GamePlayer.game_id == game.id,
+                                                       GamePlayer.role != GameRole.mafia,).all())
+
+    for player in winning_players:
+
+        statistic = (db.query(UserStatistic).filter(UserStatistic.user_id == player.user_id).first())
+
+        if not statistic:
+            statistic = UserStatistic(user_id=player.user_id, coins=0, protections=0,)
+            db.add(statistic)
+            db.flush()
+
+        statistic.coins += 10
+
+    db.commit()
